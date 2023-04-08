@@ -26,13 +26,14 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.*
 import androidx.compose.ui.semantics.dialog
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.*
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewTreeLifecycleOwner
 import androidx.lifecycle.ViewTreeViewModelStoreOwner
+import androidx.lifecycle.lifecycleScope
 import androidx.savedstate.findViewTreeSavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.google.android.material.bottomsheet.BottomSheetBehavior.*
@@ -53,7 +54,7 @@ import java.util.*
  * @property navigationBarColor  Color to apply to the navigationBar.
  */
 @Immutable
-class BottomSheetDialogProperties constructor(
+data class BottomSheetDialogProperties constructor(
     val dismissOnBackPress: Boolean = true,
     val dismissOnClickOutside: Boolean = true,
     val dismissWithAnimation: Boolean = false,
@@ -79,31 +80,6 @@ class BottomSheetDialogProperties constructor(
         NavigationBarProperties(color = navigationBarColor)
     )
 
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is BottomSheetDialogProperties) return false
-
-        if (dismissOnBackPress != other.dismissOnBackPress) return false
-        if (dismissOnClickOutside != other.dismissOnClickOutside) return false
-        if (dismissWithAnimation != other.dismissWithAnimation) return false
-        if (enableEdgeToEdge != other.enableEdgeToEdge) return false
-        if (securePolicy != other.securePolicy) return false
-        if (navigationBarProperties != other.navigationBarProperties) return false
-        if (behaviorProperties != other.behaviorProperties) return false
-
-        return true
-    }
-
-    override fun hashCode(): Int {
-        var result = dismissOnBackPress.hashCode()
-        result = 31 * result + dismissOnClickOutside.hashCode()
-        result = 31 * result + dismissWithAnimation.hashCode()
-        result = 31 * result + enableEdgeToEdge.hashCode()
-        result = 31 * result + securePolicy.hashCode()
-        result = 31 * result + navigationBarProperties.hashCode()
-        result = 31 * result + behaviorProperties.hashCode()
-        return result
-    }
 }
 
 /**
@@ -112,53 +88,41 @@ class BottomSheetDialogProperties constructor(
  * @see [com.google.android.material.bottomsheet.BottomSheetBehavior]
  */
 @Immutable
-class BottomSheetBehaviorProperties(
+data class BottomSheetBehaviorProperties(
     val state: State = State.Collapsed,
-    val maxWidth: Size = Size.NotSet,
-    val maxHeight: Size = Size.NotSet,
+    val maxSize: DpSize = DpSize.Unspecified,
     val isDraggable: Boolean = true,
     @IntRange(from = 0)
     val expandedOffset: Int = 0,
     @FloatRange(from = 0.0, to = 1.0, fromInclusive = false, toInclusive = false)
     val halfExpandedRatio: Float = 0.5F,
     val isHideable: Boolean = true,
-    val peekHeight: PeekHeight = PeekHeight.Auto,
+    val peekHeight: Dp = Dp.Unspecified,
     val isFitToContents: Boolean = true,
     val skipCollapsed: Boolean = false,
     val isGestureInsetBottomIgnored: Boolean = false
 ) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is BottomSheetBehaviorProperties) return false
 
-        if (state != other.state) return false
-        if (maxWidth != other.maxWidth) return false
-        if (maxHeight != other.maxHeight) return false
-        if (isDraggable != other.isDraggable) return false
-        if (expandedOffset != other.expandedOffset) return false
-        if (halfExpandedRatio != other.halfExpandedRatio) return false
-        if (isHideable != other.isHideable) return false
-        if (peekHeight != other.peekHeight) return false
-        if (isFitToContents != other.isFitToContents) return false
-        if (skipCollapsed != other.skipCollapsed) return false
-        if (isGestureInsetBottomIgnored != other.isGestureInsetBottomIgnored) return false
 
-        return true
+    internal fun measureMaxSize(density: Density): IntSize {
+        if (maxSize.isUnspecified)
+            return IntSize(-1, -1)
+        return with(density) {
+            val width = maxSize.width.takeIf { it.isSpecified }?.roundToPx() ?: -1
+            val height = maxSize.height.takeIf { it.isSpecified }?.roundToPx() ?: -1
+            IntSize(width, height)
+        }
     }
 
-    override fun hashCode(): Int {
-        var result = state.hashCode()
-        result = 31 * result + maxWidth.hashCode()
-        result = 31 * result + maxHeight.hashCode()
-        result = 31 * result + isDraggable.hashCode()
-        result = 31 * result + expandedOffset.hashCode()
-        result = 31 * result + halfExpandedRatio.hashCode()
-        result = 31 * result + isHideable.hashCode()
-        result = 31 * result + peekHeight.hashCode()
-        result = 31 * result + isFitToContents.hashCode()
-        result = 31 * result + skipCollapsed.hashCode()
-        result = 31 * result + isGestureInsetBottomIgnored.hashCode()
-        return result
+    @Px
+    internal fun measurePeekHeight(density: Density): Int {
+       return with(density) {
+           if (peekHeight.isSpecified) {
+               peekHeight.roundToPx()
+           } else {
+               PEEK_HEIGHT_AUTO
+           }
+       }
     }
 
     @Immutable
@@ -171,25 +135,6 @@ class BottomSheetBehaviorProperties(
         Collapsed
     }
 
-    @JvmInline
-    @Immutable
-    value class Size(@Px val value: Int) {
-
-        companion object {
-            @Stable
-            val NotSet = Size(-1)
-        }
-    }
-
-    @JvmInline
-    @Stable
-    value class PeekHeight(val value: Int) {
-
-        companion object {
-            @Stable
-            val Auto = PeekHeight(PEEK_HEIGHT_AUTO)
-        }
-    }
 }
 
 /**
@@ -210,36 +155,11 @@ class BottomSheetBehaviorProperties(
  */
 
 @Immutable
-class NavigationBarProperties(
+data class NavigationBarProperties(
     val color: Color = Color.Unspecified,
     val darkIcons: Boolean = color.luminance() > 0.5f,
     val navigationBarContrastEnforced: Boolean = true,
-    val transformColorForLightContent: (Color) -> Color = BlackScrimmed
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is NavigationBarProperties) return false
-
-        if (color != other.color) return false
-        if (darkIcons != other.darkIcons) return false
-        if (navigationBarContrastEnforced != other.navigationBarContrastEnforced) return false
-        if (transformColorForLightContent != other.transformColorForLightContent) return false
-
-        return true
-    }
-
-    override fun hashCode(): Int {
-        var result = color.hashCode()
-        result = 31 * result + darkIcons.hashCode()
-        result = 31 * result + navigationBarContrastEnforced.hashCode()
-        return result
-    }
-}
-
-private val BlackScrim = Color(0f, 0f, 0f, 0.3f) // 30% opaque black
-private val BlackScrimmed: (Color) -> Color = { original ->
-    BlackScrim.compositeOver(original)
-}
+)
 
 /**
  * Opens a bottomsheet dialog with the given content.
@@ -266,17 +186,19 @@ fun BottomSheetDialog(
     val view = LocalView.current
     val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
+    val context = LocalContext.current
     val composition = rememberCompositionContext()
     val currentContent by rememberUpdatedState(content)
     val dialogId = rememberSaveable { UUID.randomUUID() }
-    val dialog = remember(view, density) {
+    val dialog = remember(view, density, context) {
         BottomSheetDialogWrapper(
             onDismissRequest,
             properties,
             view,
             layoutDirection,
             density,
-            dialogId
+            dialogId,
+            context
         ).apply {
             setContent(composition) {
                 BottomSheetDialogLayout(
@@ -293,7 +215,6 @@ fun BottomSheetDialog(
 
     DisposableEffect(dialog) {
         dialog.show()
-
         onDispose {
             dialog.dismiss()
             dialog.disposeComposition()
@@ -304,19 +225,13 @@ fun BottomSheetDialog(
         dialog.updateParameters(
             onDismissRequest = onDismissRequest,
             properties = properties,
-            layoutDirection = layoutDirection
+            layoutDirection = layoutDirection,
+            density = density
         )
     }
 }
 
-/**
- * Provides the underlying window of a bottomsheet dialog.
- *
- * Implemented by dialog's root layout.
- */
-interface DialogWindowProvider {
-    val window: Window
-}
+
 
 @Suppress("ViewConstructor")
 private class BottomSheetDialogLayout(
@@ -347,17 +262,9 @@ private class BottomSheetDialogWrapper(
     private val composeView: View,
     layoutDirection: LayoutDirection,
     density: Density,
-    dialogId: UUID
-) : BottomSheetDialog(
-    ContextThemeWrapper(
-        composeView.context,
-        if (properties.enableEdgeToEdge) {
-            R.style.TransparentEdgeToEdgeEnabledBottomSheetTheme
-        } else {
-            R.style.TransparentEdgeToEdgeDisabledBottomSheetTheme
-        }
-    )
-),
+    dialogId: UUID,
+    context: Context
+) : BottomSheetDialog(context),
     ViewRootForInspector {
     private val bottomSheetDialogLayout: BottomSheetDialogLayout
 
@@ -442,9 +349,8 @@ private class BottomSheetDialogWrapper(
         bottomSheetDialogLayout.setViewTreeSavedStateRegistryOwner(
             composeView.findViewTreeSavedStateRegistryOwner()
         )
-
         // Initial setup
-        updateParameters(onDismissRequest, properties, layoutDirection)
+        updateParameters(onDismissRequest, properties, layoutDirection, density)
 
         onBackPressedDispatcher.addCallback(this) {
             if (properties.dismissOnBackPress) {
@@ -489,7 +395,7 @@ private class BottomSheetDialogWrapper(
                     // If we're set to use dark icons, but our windowInsetsController call didn't
                     // succeed (usually due to API level), we instead transform the color to maintain
                     // contrast
-                    transformColorForLightContent(color)
+                    Color(0f, 0f, 0f, 0.3f).compositeOver(color)
                 }
                 else -> color
             }.toArgb()
@@ -505,19 +411,20 @@ private class BottomSheetDialogWrapper(
         }
     }
 
-    private fun setBehaviorProperties(behaviorProperties: BottomSheetBehaviorProperties) {
+    private fun setBehaviorProperties(behaviorProperties: BottomSheetBehaviorProperties, density: Density) {
         this.behavior.state = when (behaviorProperties.state) {
             BottomSheetBehaviorProperties.State.Expanded -> STATE_EXPANDED
             BottomSheetBehaviorProperties.State.Collapsed -> STATE_COLLAPSED
             BottomSheetBehaviorProperties.State.HalfExpanded -> STATE_HALF_EXPANDED
         }
-        this.behavior.maxWidth = behaviorProperties.maxWidth.value
-        this.behavior.maxHeight = behaviorProperties.maxHeight.value
+        val maxSize = behaviorProperties.measureMaxSize(density)
+        this.behavior.maxWidth = maxSize.width
+        this.behavior.maxHeight = maxSize.height
         this.behavior.isDraggable = behaviorProperties.isDraggable
         this.behavior.expandedOffset = behaviorProperties.expandedOffset
         this.behavior.halfExpandedRatio = behaviorProperties.halfExpandedRatio
         this.behavior.isHideable = behaviorProperties.isHideable
-        this.behavior.peekHeight = behaviorProperties.peekHeight.value
+        this.behavior.peekHeight = behaviorProperties.measurePeekHeight(density)
         this.behavior.isFitToContents = behaviorProperties.isFitToContents
         this.behavior.skipCollapsed = behaviorProperties.skipCollapsed
         this.behavior.isGestureInsetBottomIgnored = behaviorProperties.isGestureInsetBottomIgnored
@@ -526,7 +433,8 @@ private class BottomSheetDialogWrapper(
     fun updateParameters(
         onDismissRequest: () -> Unit,
         properties: BottomSheetDialogProperties,
-        layoutDirection: LayoutDirection
+        layoutDirection: LayoutDirection,
+        density: Density
     ) {
         this.onDismissRequest = onDismissRequest
         this.properties = properties
@@ -534,7 +442,7 @@ private class BottomSheetDialogWrapper(
         setLayoutDirection(layoutDirection)
         setCanceledOnTouchOutside(properties.dismissOnClickOutside)
         setNavigationBarProperties(properties.navigationBarProperties)
-        setBehaviorProperties(properties.behaviorProperties)
+        setBehaviorProperties(properties.behaviorProperties, density)
         dismissWithAnimation = properties.dismissWithAnimation
     }
 
